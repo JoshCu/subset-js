@@ -160,6 +160,7 @@ const PARQUET_URLS = {
 // ============================================================
 let networkGraph = null;
 let adjacency = null;
+let downstream = null;
 let outletCatId = null;
 let upstreamCatIds = [];
 let upstreamNumericIds = new Set();
@@ -199,13 +200,16 @@ async function loadNetworkGraph() {
   log(`  ${networkGraph.meta.total_edges} edges in ${((performance.now()-t0)/1000).toFixed(1)}s`, 'success');
 
   const upstream = new Map();
+  const fwd = new Map();
   for (const [ft, fn, tt, tn] of networkGraph.edges) {
     if ((ft === 0 || ft === 2) && (tt === 1 || tt === 3 || tt === 4)) {
       if (!upstream.has(tn)) upstream.set(tn, new Set());
       upstream.get(tn).add(fn);
+      if (!fwd.has(fn)) fwd.set(fn, tn);
     }
   }
   adjacency = upstream;
+  downstream = fwd;
   log(`  Adjacency: ${upstream.size} nodes`, 'success');
 }
 
@@ -558,7 +562,6 @@ async function subsetAndDownload() {
     // Build ID arrays matching Python's upstream_ids prefixing
     const catIds = nums.map(n => `cat-${n}`);
     const wbIds  = nums.map(n => `wb-${n}`);
-    const nexIds = nums.map(n => `nex-${n}`);
 
     // The Python subset_table passes the same ids list to every table.
     // The SQL WHERE key_name IN (...) naturally ignores non-matching prefixes.
@@ -586,49 +589,46 @@ async function subsetAndDownload() {
       }
     }
 
-    // 1. divides — filter by divide_id with cat- IDs
-    await doTable('divides', PARQUET_URLS['divides'], 'divide_id', catIds);
+    // Compute nexus IDs from network topology (no need to fetch flowpaths first)
+    // Include nex-N for every N in the selection that has an upstream parent also in the selection
+    const computedNexIds = [];
+    for (const n of upstreamNumericIds) {
+      const parents = adjacency.get(n);
+      if (parents) {
+        for (const p of parents) {
+          if (upstreamNumericIds.has(p)) { computedNexIds.push(`nex-${n}`); break; }
+        }
+      }
+    }
+    // Add the outlet's downstream nexus (not in the upstream selection itself)
+    const outletNumeric = parseInt(outletCatId.split('-')[1]);
+    const outletDownstream = downstream.get(outletNumeric);
+    if (outletDownstream != null) computedNexIds.push(`nex-${outletDownstream}`);
+    const allNexIds = [...new Set(computedNexIds)];
 
-    // 2. divide-attributes — Python pulls divide_id from already-subset divides
-    const divideAttrIds = (allTableData['divides']?.rows || []).map(r => r.divide_id).filter(Boolean);
-    await doTable('divide-attributes', PARQUET_URLS['divide-attributes'], 'divide_id',
-      divideAttrIds.length > 0 ? divideAttrIds : catIds);
+    // --- Wave 1: all tables whose IDs are derived from the network graph ---
+    await Promise.all([
+      doTable('divides',              PARQUET_URLS['divides'],              'divide_id', catIds),
+      doTable('divide-attributes',    PARQUET_URLS['divide-attributes'],    'divide_id', catIds),
+      doTable('flowpaths',            PARQUET_URLS['flowpaths'],            'id', wbIds),
+      doTable('flowpath-attributes',  PARQUET_URLS['flowpath-attributes'],  'id', wbIds),
+      doTable('flowpath-attributes-ml', PARQUET_URLS['flowpath-attributes-ml'], 'id', wbIds),
+      doTable('hydrolocations',       PARQUET_URLS['hydrolocations'],       'id', wbIds),
+      doTable('nexus',                PARQUET_URLS['nexus'],                'id', allNexIds),
+      doTable('pois',                 PARQUET_URLS['pois'],                 'id', wbIds),
+      doTable('network',              PARQUET_URLS['network'],              'id', [...wbIds, ...allNexIds]),
+    ]);
 
-    // 3. flowpath-attributes — filter by id with wb- IDs
-    await doTable('flowpath-attributes', PARQUET_URLS['flowpath-attributes'], 'id', wbIds);
-
-    // 4. flowpath-attributes-ml — filter by id with wb- IDs
-    await doTable('flowpath-attributes-ml', PARQUET_URLS['flowpath-attributes-ml'], 'id', wbIds);
-
-    // 5. flowpaths — filter by id with wb- IDs
-    await doTable('flowpaths', PARQUET_URLS['flowpaths'], 'id', wbIds);
-
-    // 6. hydrolocations — filter by id with wb- IDs
-    await doTable('hydrolocations', PARQUET_URLS['hydrolocations'], 'id', wbIds);
-
-    // 7. nexus — Python: ids + toid from already-subset flowpaths
-    //    The base ids include nex- prefixed IDs, plus toid values from flowpaths
-    const fpToids = (allTableData['flowpaths']?.rows || []).map(r => r.toid).filter(Boolean);
-    const allNexIds = [...new Set([...nexIds, ...fpToids])];
-    await doTable('nexus', PARQUET_URLS['nexus'], 'id', allNexIds);
-
-    // 8. pois — filter by id with wb- IDs
-    await doTable('pois', PARQUET_URLS['pois'], 'id', wbIds);
-
-    // 9. lakes — Python: gets poi_id from already-subset pois table
+    // --- Wave 2: lakes depends on pois results ---
     const poiIds = (allTableData['pois']?.rows || []).map(r => r.poi_id).filter(x => x != null);
     if (poiIds.length > 0) {
       await doTable('lakes', PARQUET_URLS['lakes'], 'poi_id', poiIds);
     } else {
       step++;
       setProgress((step / totalSteps) * 100);
-      // Store url so buildGeoPackage can still create the empty table with correct schema
       allTableData['lakes'] = { rows: [], url: PARQUET_URLS['lakes'] };
       log('  lakes... 0 rows (no poi_ids)', '');
     }
-
-    // 10. network — id column has wb- and nex- prefixed values; cat-X == wb-X
-    await doTable('network', PARQUET_URLS['network'], 'id', [...wbIds, ...allNexIds]);
 
     // Build GeoPackage
     step++;
