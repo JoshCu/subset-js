@@ -53,6 +53,23 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
 .checkbox-field{display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer}
 .checkbox-field input[type="checkbox"]{width:14px;height:14px;cursor:pointer;accent-color:var(--accent)}
 .checkbox-field span{font-size:12px;color:var(--text-dim)}
+#legend{
+  position:absolute;top:16px;right:16px;z-index:10;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:0 8px 32px rgba(0,0,0,.5);padding:12px 16px;min-width:200px;
+}
+#legend h2{font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;font-family:'JetBrains Mono',monospace}
+.legend-item{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.legend-item:last-child{margin-bottom:0}
+.legend-item input[type="checkbox"]{width:14px;height:14px;cursor:pointer;accent-color:var(--accent)}
+.legend-item label{font-size:12px;color:var(--text-dim);cursor:pointer;flex:1}
+.legend-item input[type="color"]{
+  width:28px;height:22px;padding:0;border:1px solid var(--border);border-radius:3px;
+  background:var(--bg);cursor:pointer;-webkit-appearance:none;appearance:none;
+}
+.legend-item input[type="color"]::-webkit-color-swatch-wrapper{padding:1px}
+.legend-item input[type="color"]::-webkit-color-swatch{border:none;border-radius:2px}
+.legend-item input[type="color"]::-moz-color-swatch{border:none;border-radius:2px}
 </style>
 </head>
 <body>
@@ -79,6 +96,20 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
   <div id="selection-info"></div>
   <div id="progress-bar"><div id="progress-fill"></div></div>
   <div id="log-container"><div id="log"></div></div>
+</div>
+
+<div id="legend">
+  <h2>Reference Layers</h2>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-flowpaths"/>
+    <label for="toggle-flowpaths">Flowpaths</label>
+    <input type="color" id="color-flowpaths" value="#FF0000"/>
+  </div>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-divides"/>
+    <label for="toggle-divides">Divides</label>
+    <input type="color" id="color-divides" value="#11FF00"/>
+  </div>
 </div>
 
 <script>
@@ -246,6 +277,48 @@ function initMap() {
     style: prefersDark ? darkStyle : lightStyle,
     center: [-96, 40],
     zoom: 4,
+  });
+  
+  map.on("styledata", () => {
+    if (map.getSource("oconus_ref_flowpaths")) return;
+    map.addSource("oconus_ref_flowpaths", {
+      type: "vector",
+      url: "pmtiles://https://communityhydrofabric.s3.us-east-1.amazonaws.com/map/only_geometry/reference/flowpaths.pmtiles",
+    });
+    map.addLayer(
+      {
+        id: "ref_flowpaths",
+        type: "line",
+        source: "oconus_ref_flowpaths",
+        "source-layer": "conus_flowpaths",
+        layout: { visibility: "none" },
+        paint: {
+          "line-width": 1,
+          "line-color": document.getElementById('color-flowpaths').value,
+          "line-opacity": 1,
+        },
+      },
+      "flowpaths"
+    );
+    map.addSource("oconus_ref_divides", {
+      type: "vector",
+      url: "pmtiles://https://communityhydrofabric.s3.us-east-1.amazonaws.com/map/only_geometry/reference/divides.pmtiles",
+    });
+    map.addLayer(
+      {
+        id: "ref_divides",
+        type: "line",
+        source: "oconus_ref_divides",
+        "source-layer": "conus_divides",
+        layout: { visibility: "none" },
+        paint: {
+          "line-width": 0.5,
+          "line-color": document.getElementById('color-divides').value,
+          "line-opacity": 0.9,
+        },
+      },
+      "catchments"
+    );
   });
 
   map.on('load', () => {
@@ -700,6 +773,27 @@ document.getElementById('input-catid').addEventListener('keydown', e => {
   }
 });
 document.getElementById('btn-subset').addEventListener('click', subsetAndDownload);
+
+document.getElementById('toggle-flowpaths').addEventListener('change', (e) => {
+  if (map && map.getLayer('ref_flowpaths')) {
+    map.setLayoutProperty('ref_flowpaths', 'visibility', e.target.checked ? 'visible' : 'none');
+  }
+});
+document.getElementById('toggle-divides').addEventListener('change', (e) => {
+  if (map && map.getLayer('ref_divides')) {
+    map.setLayoutProperty('ref_divides', 'visibility', e.target.checked ? 'visible' : 'none');
+  }
+});
+document.getElementById('color-flowpaths').addEventListener('input', (e) => {
+  if (map && map.getLayer('ref_flowpaths')) {
+    map.setPaintProperty('ref_flowpaths', 'line-color', e.target.value);
+  }
+});
+document.getElementById('color-divides').addEventListener('input', (e) => {
+  if (map && map.getLayer('ref_divides')) {
+    map.setPaintProperty('ref_divides', 'line-color', e.target.value);
+  }
+});
 document.getElementById('btn-clear').addEventListener('click', () => {
   outletCatId = null;
   upstreamCatIds = [];
