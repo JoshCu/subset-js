@@ -18,7 +18,19 @@
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Source Sans 3',sans-serif;background:var(--bg);color:var(--text);overflow:hidden;height:100vh;width:100vw}
-#map{position:absolute;inset:0;z-index:0}
+#map-container{position:absolute;inset:0;z-index:0;display:flex}
+#map{flex:1}
+#map-right{display:none}
+body.split-view #map{flex:0 0 50%}
+body.split-view #map-right{display:block;flex:0 0 50%;border-left:2px solid var(--border)}
+.map-label{display:none;position:absolute;top:8px;z-index:5;
+  padding:4px 12px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);font-size:11px;font-weight:600;color:var(--text-dim);
+  font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.5px;
+  pointer-events:none}
+body.split-view .map-label{display:block}
+#label-left{left:25%;transform:translateX(-50%)}
+#label-right{left:75%;transform:translateX(-50%)}
 #sidebar{
   position:absolute;top:16px;left:16px;z-index:10;width:340px;
   background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -73,7 +85,12 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
 </style>
 </head>
 <body>
-<div id="map"></div>
+<div id="map-container">
+  <div id="map"></div>
+  <div id="map-right"></div>
+  <div id="label-left" class="map-label">Catchments</div>
+  <div id="label-right" class="map-label">Reference</div>
+</div>
 <div id="sidebar">
   <header>
     <h1>&#9651; HYDROFABRIC SUBSETTER</h1>
@@ -100,6 +117,11 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
 
 <div id="legend">
   <h2>Reference Layers</h2>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-split"/>
+    <label for="toggle-split">Split View</label>
+  </div>
+  <hr style="border:none;border-top:1px solid var(--border);margin:8px 0"/>
   <div class="legend-item">
     <input type="checkbox" id="toggle-flowpaths"/>
     <label for="toggle-flowpaths">Flowpaths</label>
@@ -142,6 +164,9 @@ let outletCatId = null;
 let upstreamCatIds = [];
 let upstreamNumericIds = new Set();
 let map = null;
+let mapRight = null;
+let splitActive = false;
+let syncing = false;
 
 let hp = null;
 let compressors = null;
@@ -335,18 +360,143 @@ function initMap() {
 }
 
 function updateMapFilters() {
-  if (!map || !map.isStyleLoaded()) return;
-  if (!outletCatId) {
-    map.setFilter('selected-catchments', ['any', ['in', 'divide_id', '']]);
-    map.setFilter('upstream-catchments', ['any', ['in', 'divide_id', '']]);
-    return;
+  const maps = [map];
+  if (splitActive && mapRight && mapRight.isStyleLoaded()) maps.push(mapRight);
+
+  for (const m of maps) {
+    if (!m || !m.isStyleLoaded()) continue;
+    if (!outletCatId) {
+      m.setFilter('selected-catchments', ['any', ['in', 'divide_id', '']]);
+      m.setFilter('upstream-catchments', ['any', ['in', 'divide_id', '']]);
+      continue;
+    }
+    m.setFilter('selected-catchments', ['any', ['in', 'divide_id', outletCatId]]);
+    const upstreamList = upstreamCatIds.filter(id => id !== outletCatId);
+    if (upstreamList.length > 0) {
+      m.setFilter('upstream-catchments', ['any', ['in', 'divide_id', ...upstreamList]]);
+    } else {
+      m.setFilter('upstream-catchments', ['any', ['in', 'divide_id', '']]);
+    }
   }
-  map.setFilter('selected-catchments', ['any', ['in', 'divide_id', outletCatId]]);
-  const upstreamList = upstreamCatIds.filter(id => id !== outletCatId);
-  if (upstreamList.length > 0) {
-    map.setFilter('upstream-catchments', ['any', ['in', 'divide_id', ...upstreamList]]);
+}
+
+// ============================================================
+// SPLIT VIEW
+// ============================================================
+function initMapRight() {
+  const darkStyle = `${S3_MAP}/styles/dark-style.json`;
+  const lightStyle = `${S3_MAP}/styles/light-style.json`;
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  mapRight = new maplibregl.Map({
+    container: 'map-right',
+    style: prefersDark ? darkStyle : lightStyle,
+    center: map.getCenter(),
+    zoom: map.getZoom(),
+    bearing: map.getBearing(),
+    pitch: map.getPitch(),
+  });
+
+  mapRight.on("styledata", () => {
+    // Hide base catchments/flowpaths on the reference map
+    if (mapRight.getLayer("catchments")) mapRight.setLayoutProperty("catchments", "visibility", "none");
+    if (mapRight.getLayer("flowpaths")) mapRight.setLayoutProperty("flowpaths", "visibility", "none");
+
+    if (mapRight.getSource("oconus_ref_flowpaths")) return;
+    mapRight.addSource("oconus_ref_flowpaths", {
+      type: "vector",
+      url: "pmtiles://https://communityhydrofabric.s3.us-east-1.amazonaws.com/map/only_geometry/reference/flowpaths.pmtiles",
+    });
+    mapRight.addLayer({
+      id: "ref_flowpaths",
+      type: "line",
+      source: "oconus_ref_flowpaths",
+      "source-layer": "conus_flowpaths",
+      layout: { visibility: document.getElementById('toggle-flowpaths').checked ? 'visible' : 'none' },
+      paint: {
+        "line-width": 1,
+        "line-color": document.getElementById('color-flowpaths').value,
+        "line-opacity": 1,
+      },
+    });
+    mapRight.addSource("oconus_ref_divides", {
+      type: "vector",
+      url: "pmtiles://https://communityhydrofabric.s3.us-east-1.amazonaws.com/map/only_geometry/reference/divides.pmtiles",
+    });
+    mapRight.addLayer({
+      id: "ref_divides",
+      type: "line",
+      source: "oconus_ref_divides",
+      "source-layer": "conus_divides",
+      layout: { visibility: document.getElementById('toggle-divides').checked ? 'visible' : 'none' },
+      paint: {
+        "line-width": 0.5,
+        "line-color": document.getElementById('color-divides').value,
+        "line-opacity": 0.9,
+      },
+    });
+
+    // Apply any existing selection to the right map
+    updateMapFilters();
+  });
+
+  // Sync camera between maps
+  function onMove(source, target) {
+    if (syncing) return;
+    syncing = true;
+    target.jumpTo({
+      center: source.getCenter(),
+      zoom: source.getZoom(),
+      bearing: source.getBearing(),
+      pitch: source.getPitch(),
+    });
+    syncing = false;
+  }
+  map.on('move', () => { if (splitActive && mapRight) onMove(map, mapRight); });
+  mapRight.on('move', () => { if (splitActive) onMove(mapRight, map); });
+}
+
+function toggleSplitView(active) {
+  splitActive = active;
+  document.body.classList.toggle('split-view', active);
+
+  if (active) {
+    // Hide ref layers on main map
+    if (map.getLayer('ref_flowpaths')) map.setLayoutProperty('ref_flowpaths', 'visibility', 'none');
+    if (map.getLayer('ref_divides')) map.setLayoutProperty('ref_divides', 'visibility', 'none');
+
+    if (!mapRight) {
+      // Show container first so MapLibre can measure it, then init
+      setTimeout(() => {
+        initMapRight();
+        // Auto-enable both ref layers on the right map
+        document.getElementById('toggle-flowpaths').checked = true;
+        document.getElementById('toggle-flowpaths').dispatchEvent(new Event('change'));
+        document.getElementById('toggle-divides').checked = true;
+        document.getElementById('toggle-divides').dispatchEvent(new Event('change'));
+        map.resize();
+      }, 0);
+    } else {
+      setTimeout(() => {
+        map.resize();
+        mapRight.resize();
+        // Sync position
+        mapRight.jumpTo({ center: map.getCenter(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch() });
+      }, 0);
+    }
   } else {
-    map.setFilter('upstream-catchments', ['any', ['in', 'divide_id', '']]);
+    // Transfer ref layer state back to main map
+    const fpVisible = document.getElementById('toggle-flowpaths').checked;
+    const dvVisible = document.getElementById('toggle-divides').checked;
+    if (map.getLayer('ref_flowpaths')) {
+      map.setLayoutProperty('ref_flowpaths', 'visibility', fpVisible ? 'visible' : 'none');
+      map.setPaintProperty('ref_flowpaths', 'line-color', document.getElementById('color-flowpaths').value);
+    }
+    if (map.getLayer('ref_divides')) {
+      map.setLayoutProperty('ref_divides', 'visibility', dvVisible ? 'visible' : 'none');
+      map.setPaintProperty('ref_divides', 'line-color', document.getElementById('color-divides').value);
+    }
+    setTimeout(() => map.resize(), 0);
   }
 }
 
@@ -774,24 +924,34 @@ document.getElementById('input-catid').addEventListener('keydown', e => {
 });
 document.getElementById('btn-subset').addEventListener('click', subsetAndDownload);
 
+document.getElementById('toggle-split').addEventListener('change', (e) => {
+  toggleSplitView(e.target.checked);
+});
+
 document.getElementById('toggle-flowpaths').addEventListener('change', (e) => {
-  if (map && map.getLayer('ref_flowpaths')) {
-    map.setLayoutProperty('ref_flowpaths', 'visibility', e.target.checked ? 'visible' : 'none');
+  const vis = e.target.checked ? 'visible' : 'none';
+  const target = splitActive && mapRight ? mapRight : map;
+  if (target && target.getLayer('ref_flowpaths')) {
+    target.setLayoutProperty('ref_flowpaths', 'visibility', vis);
   }
 });
 document.getElementById('toggle-divides').addEventListener('change', (e) => {
-  if (map && map.getLayer('ref_divides')) {
-    map.setLayoutProperty('ref_divides', 'visibility', e.target.checked ? 'visible' : 'none');
+  const vis = e.target.checked ? 'visible' : 'none';
+  const target = splitActive && mapRight ? mapRight : map;
+  if (target && target.getLayer('ref_divides')) {
+    target.setLayoutProperty('ref_divides', 'visibility', vis);
   }
 });
 document.getElementById('color-flowpaths').addEventListener('input', (e) => {
-  if (map && map.getLayer('ref_flowpaths')) {
-    map.setPaintProperty('ref_flowpaths', 'line-color', e.target.value);
+  const target = splitActive && mapRight ? mapRight : map;
+  if (target && target.getLayer('ref_flowpaths')) {
+    target.setPaintProperty('ref_flowpaths', 'line-color', e.target.value);
   }
 });
 document.getElementById('color-divides').addEventListener('input', (e) => {
-  if (map && map.getLayer('ref_divides')) {
-    map.setPaintProperty('ref_divides', 'line-color', e.target.value);
+  const target = splitActive && mapRight ? mapRight : map;
+  if (target && target.getLayer('ref_divides')) {
+    target.setPaintProperty('ref_divides', 'line-color', e.target.value);
   }
 });
 document.getElementById('btn-clear').addEventListener('click', () => {
