@@ -9,6 +9,7 @@
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
 <script src="https://unpkg.com/pmtiles@4.0.1/dist/pmtiles.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
+<script src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
 <style>
 :root {
   --bg:#0a0e17; --surface:#111827; --surface2:#1e293b; --border:#334155;
@@ -116,7 +117,7 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
 </div>
 
 <div id="legend">
-  <h2>Reference Layers</h2>
+  <h2>Layers</h2>
   <div class="legend-item">
     <input type="checkbox" id="toggle-split"/>
     <label for="toggle-split">Split View</label>
@@ -131,6 +132,20 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
     <input type="checkbox" id="toggle-divides"/>
     <label for="toggle-divides">Divides</label>
     <input type="color" id="color-divides" value="#11FF00"/>
+  </div>
+  <hr style="border:none;border-top:1px solid var(--border);margin:8px 0"/>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-hillshade"/>
+    <label for="toggle-hillshade">Hillshade</label>
+  </div>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-contours"/>
+    <label for="toggle-contours">Contours</label>
+    <input type="color" id="color-contours" value="#d4a574"/>
+  </div>
+  <div class="legend-item">
+    <input type="checkbox" id="toggle-terrain"/>
+    <label for="toggle-terrain">3D Terrain</label>
   </div>
 </div>
 
@@ -168,6 +183,8 @@ let map = null;
 let mapRight = null;
 let splitActive = false;
 let syncing = false;
+
+let demSource = null;
 
 let hp = null;
 let compressors = null;
@@ -293,9 +310,87 @@ async function readParquetFiltered(url, filterCol, idArray) {
 // ============================================================
 // MAP
 // ============================================================
+function addElevationLayers(m, beforeId) {
+  if (m.getSource("hillshadeSource")) return;
+  const before = m.getLayer(beforeId) ? beforeId : undefined;
+  m.addSource("hillshadeSource", {
+    type: "raster-dem",
+    tiles: [demSource.sharedDemProtocolUrl],
+    tileSize: 512,
+    maxzoom: 15,
+  });
+  m.addSource("contourSource", {
+    type: "vector",
+    tiles: [demSource.contourProtocolUrl({
+      multiplier: 1,
+      overzoom: 1,
+      thresholds: {
+        11: [200, 1000],
+        12: [100, 500],
+        13: [100, 500],
+        14: [50, 200],
+        15: [20, 100],
+      },
+      elevationKey: 'ele',
+      levelKey: 'level',
+      contourLayer: 'contours',
+    })],
+    maxzoom: 16,
+  });
+  m.addLayer({
+    id: "hills",
+    type: "hillshade",
+    source: "hillshadeSource",
+    layout: { visibility: document.getElementById('toggle-hillshade').checked ? 'visible' : 'none' },
+    paint: { "hillshade-exaggeration": 0.1 },
+  }, before);
+  m.addLayer({
+    id: "contours",
+    type: "line",
+    source: "contourSource",
+    "source-layer": "contours",
+    layout: { visibility: document.getElementById('toggle-contours').checked ? 'visible' : 'none' },
+    paint: {
+      "line-opacity": 0.5,
+      "line-color": document.getElementById('color-contours').value,
+      "line-width": ["match", ["get", "level"], 1, 1, 0.5],
+    },
+  }, before);
+  m.addLayer({
+    id: "contour-text",
+    type: "symbol",
+    source: "contourSource",
+    "source-layer": "contours",
+    filter: [">", ["get", "level"], 0],
+    layout: {
+      visibility: document.getElementById('toggle-contours').checked ? 'visible' : 'none',
+      "symbol-placement": "line",
+      "text-size": 10,
+      "text-field": ["concat", ["number-format", ["get", "ele"], {}], "m"],
+      "text-font": ["Noto Sans Bold"],
+    },
+    paint: {
+      "text-color": document.getElementById('color-contours').value,
+      "text-halo-color": "rgba(0,0,0,0.8)",
+      "text-halo-width": 1,
+    },
+  }, before);
+  if (document.getElementById('toggle-terrain').checked) {
+    m.setTerrain({ source: "hillshadeSource", exaggeration: 0.01 });
+  }
+}
+
 function initMap() {
   const protocol = new pmtiles.Protocol({ metadata: true });
   maplibregl.addProtocol('pmtiles', protocol.tile);
+
+  demSource = new mlcontour.DemSource({
+    url: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+    encoding: 'terrarium',
+    maxzoom: 15,
+    worker: true,
+  });
+  demSource.setupMaplibre(maplibregl);
 
   const darkStyle = `${S3_MAP}/styles/dark-style.json`;
   const lightStyle = `${S3_MAP}/styles/light-style.json`;
@@ -307,8 +402,9 @@ function initMap() {
     center: [-96, 40],
     zoom: 4,
   });
-  
+
   map.on("styledata", () => {
+    addElevationLayers(map, "catchments");
     if (map.getSource("oconus_ref_flowpaths")) return;
     map.addSource("oconus_ref_flowpaths", {
       type: "vector",
@@ -406,6 +502,7 @@ function initMapRight() {
     if (mapRight.getLayer("catchments")) mapRight.setLayoutProperty("catchments", "visibility", "none");
     if (mapRight.getLayer("flowpaths")) mapRight.setLayoutProperty("flowpaths", "visibility", "none");
 
+    addElevationLayers(mapRight, "flowpaths");
     if (mapRight.getSource("oconus_ref_flowpaths")) return;
     mapRight.addSource("oconus_ref_flowpaths", {
       type: "vector",
@@ -954,6 +1051,39 @@ document.getElementById('color-divides').addEventListener('input', (e) => {
     target.setPaintProperty('ref_divides', 'line-color', e.target.value);
   }
 });
+
+// Elevation layers apply to both maps simultaneously
+function forEachMap(fn) {
+  if (map) fn(map);
+  if (splitActive && mapRight) fn(mapRight);
+}
+document.getElementById('toggle-hillshade').addEventListener('change', (e) => {
+  const vis = e.target.checked ? 'visible' : 'none';
+  forEachMap(m => { if (m.getLayer('hills')) m.setLayoutProperty('hills', 'visibility', vis); });
+});
+document.getElementById('toggle-contours').addEventListener('change', (e) => {
+  const vis = e.target.checked ? 'visible' : 'none';
+  forEachMap(m => {
+    if (m.getLayer('contours')) m.setLayoutProperty('contours', 'visibility', vis);
+    if (m.getLayer('contour-text')) m.setLayoutProperty('contour-text', 'visibility', vis);
+  });
+});
+document.getElementById('color-contours').addEventListener('input', (e) => {
+  forEachMap(m => {
+    if (m.getLayer('contours')) m.setPaintProperty('contours', 'line-color', e.target.value);
+    if (m.getLayer('contour-text')) m.setPaintProperty('contour-text', 'text-color', e.target.value);
+  });
+});
+document.getElementById('toggle-terrain').addEventListener('change', (e) => {
+  forEachMap(m => {
+    if (e.target.checked) {
+      if (m.getSource('hillshadeSource')) m.setTerrain({ source: 'hillshadeSource', exaggeration: 0.01 });
+    } else {
+      m.setTerrain(null);
+    }
+  });
+});
+
 document.getElementById('btn-clear').addEventListener('click', () => {
   outletCatId = null;
   upstreamCatIds = [];
