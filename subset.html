@@ -215,8 +215,14 @@ async function loadNetworkGraph() {
 
 function getUpstreamIds(outletNumeric, includeOutlet = true) {
   const visited = new Set();
+  visited.add(outletNumeric);
   const queue = [outletNumeric];
-  if (includeOutlet) visited.add(outletNumeric);
+
+  if (includeOutlet) {
+    const ds = downstream.get(outletNumeric);
+    if (ds != null) queue.unshift(ds);
+  }
+
   while (queue.length > 0) {
     const cur = queue.shift();
     const parents = adjacency.get(cur);
@@ -923,6 +929,9 @@ document.getElementById('input-catid').addEventListener('keydown', e => {
   }
 });
 document.getElementById('btn-subset').addEventListener('click', subsetAndDownload);
+document.getElementById('chk-include-outlet').addEventListener('change', () => {
+  if (outletCatId) selectOutlet(outletCatId);
+});
 
 document.getElementById('toggle-split').addEventListener('change', (e) => {
   toggleSplitView(e.target.checked);
